@@ -32,7 +32,7 @@ int main(void)
 
         // write debug text
         SDL_SetRenderDrawColor(renderer, 0xFF, 0xFF, 0xFF, 0xFF);
-        SDL_RenderDebugText(renderer, 370, 290, "Hello SDL!");
+        SDL_RenderDebugText(renderer, 370, 290, "Hello Pola, Kris and Andreas!");
 
         // show frame
         SDL_RenderPresent(renderer);
