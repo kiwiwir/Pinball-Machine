@@ -1,4 +1,4 @@
-set(targetname "MY_GAME_PLS_CHANGE_MY_NAME")
+set(targetname "Pinball-Machine")
 file(GLOB file_src_list "*.c" "*.cpp")
 
 add_executable(${targetname} ${file_src_list})
