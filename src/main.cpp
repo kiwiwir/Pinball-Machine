@@ -2,6 +2,8 @@
 
 #include <itu_engine.hpp>
 
+#include <gameObjectsLib.hpp>
+
 int main(void)
 {
     const char* window_title = "Hello SDL";
