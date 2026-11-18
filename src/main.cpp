@@ -4,7 +4,8 @@
 const float GRAVITY = -9.8f;
 
 const int COLLISION_FILTER_PLAYER         = 0b00001;
-const int COLLISION_FILTER_OBSTACLE         = 0b00010;
+const int COLLISION_FILTER_SCORE_OBSTACLE = 0b00010;
+const int COLLISION_FILTER_OBSTACLE		  = 0b00100;
 const int ENTITY_COUNT = 1000;
 const float ball_radius          = 0.4f;
 const float launcher_width       = 1.0f;
@@ -16,6 +17,14 @@ const float launcher_bottom_y    = -8.0f;  // fixed bottom of the launcher (worl
 const float power_min    = 5.0f;
 const float power_max    = 40.0f;
 const float charge_speed = 20.0f;          // power gained per second while E is held
+
+bool DEBUG_render_textures = true;
+bool DEBUG_render_outlines = false;
+bool DEBUG_physics = true;
+int DEBUG_simulation_type_current = 0;
+
+b2DebugDraw debug_draw;
+
 
 enum LauncherPhase
 {
@@ -50,6 +59,9 @@ struct PinballGameState
 
 	vec2f    ball_position;
 	b2BodyId ball_body_id;
+
+	b2BodyId* flipper_left_id;
+	b2BodyId* flipper_right_id;
 
 	b2WorldId world_id;
 	SDL_Texture* atlas;
@@ -93,6 +105,7 @@ static vec2f ball_rest_position(EngineContext* context, PinballGameState* state)
 	return vec2f { launcher_x(context), top_y + ball_radius };
 }
 
+
 static void entity_create(PinballGameState* state, Entity * entity, b2BodyId bodyId)
 {
 	if(!(state->entities_alive_count < ENTITY_COUNT))
@@ -133,10 +146,11 @@ static void entity_destroy(PinballGameState* state, b2BodyId bodyId)
 	--state->entities_alive_count;
 }
 
-
 static void game_init(EngineContext* context, PinballGameState* state)
 {
-	itu_lib_input_set_mapping_keyboard(context, SDLK_E, BTN_TYPE_ACTION_0);
+	itu_lib_input_set_mapping_keyboard(context, SDLK_A, BTN_TYPE_LEFT);
+	itu_lib_input_set_mapping_keyboard(context, SDLK_D, BTN_TYPE_RIGHT);
+	itu_lib_input_set_mapping_keyboard(context, SDLK_SPACE, BTN_TYPE_ACTION_0);
 
 	itu_lib_input_set_mapping_keyboard(context, SDLK_F1, BTN_TYPE_DEBUG_F1);
 	itu_lib_input_set_mapping_keyboard(context, SDLK_TAB, BTN_TYPE_DEBUG_RESET);
@@ -164,61 +178,214 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	state->request_reset = false;
 	state->ball_position = ball_rest_position(context, state);
 
+	// launcher:
+	b2BodyDef launcher_body_def = b2DefaultBodyDef();
+	launcher_body_def.type      = b2_kinematicBody;
+	launcher_body_def.position  = {5.5, -6};
+	
+	b2ShapeDef launcher_shape_def = b2DefaultShapeDef();
+	launcher_shape_def.density = 1;
+
+	Entity* launcher_entity = new Entity();
+	launcher_entity->transform.scale = vec2f{1, 1};
+	launcher_entity->transform.rotation = 0;
+
+	b2Polygon launcher_polygon = b2MakeBox(0.5f, 2.0f);
+	
+	launcher_entity->body_id = b2CreateBody(state->world_id, &launcher_body_def);
+
+	b2CreatePolygonShape(launcher_entity->body_id, &launcher_shape_def, &launcher_polygon);
+
 	// ball: dynamic body, disabled while it rests on the launcher
 	b2BodyDef body_def = b2DefaultBodyDef();
 	body_def.type      = b2_dynamicBody;
 	body_def.position  = value_cast(b2Vec2, state->ball_position);
-	body_def.isEnabled = false;
+	body_def.isEnabled = true;
 
 	b2ShapeDef shape_def = b2DefaultShapeDef();
 	shape_def.density = 1;
 
+	Entity* ball_entity = new Entity();
+	ball_entity->transform.scale = vec2f{1, 1};
+	ball_entity->transform.rotation = 0;
+	vec2f size = itu_lib_sprite_get_world_size(context, &ball_entity->sprite, &ball_entity->transform);
+	vec2f offset = -mul_element_wise(size, ball_entity->sprite.pivot - vec2f{ 0.5f, 0.5f });
+
+
 	b2Circle circle = { { 0, 0 }, ball_radius };
 
+	
+	circle.center = value_cast(b2Vec2, offset);
+	body_def.position = b2Vec2{-2,0};
+	ball_entity->body_id = b2CreateBody(state->world_id, &body_def);
+
 	state->ball_body_id = b2CreateBody(state->world_id, &body_def);
-	b2CreateCircleShape(state->ball_body_id, &shape_def, &circle);
+	//b2CreateCircleShape(state->ball_body_id, &shape_def, &circle);
 	
 	shape_def.density = 1;
 	shape_def.enableHitEvents = true;
 	shape_def.enableContactEvents = true;
 	shape_def.filter.categoryBits = COLLISION_FILTER_PLAYER;
-	shape_def.filter.maskBits     = COLLISION_FILTER_OBSTACLE;
+	shape_def.filter.maskBits     = COLLISION_FILTER_OBSTACLE | COLLISION_FILTER_SCORE_OBSTACLE;
+
+	entity_create(state, ball_entity, ball_entity->body_id);
+
+	b2CreateCircleShape(ball_entity->body_id, &shape_def, &circle);
+
+	itu_lib_sprite_init(
+		&ball_entity->sprite,
+		state->atlas,
+		itu_lib_sprite_get_source_rect(7, 7, 16, 16)
+	);	
 
 	//SphereObject
 
 	{
-		b2BodyDef hole_body_def = b2DefaultBodyDef();
-			hole_body_def.type = b2_staticBody;
-			
-			b2ShapeDef hole_shape_def = b2DefaultShapeDef();
-			hole_shape_def.isSensor = true;
-			hole_shape_def.enableSensorEvents = true;
-			Entity* ball_entity = new Entity();
+		b2BodyDef sphere_body_def = b2DefaultBodyDef();
+		sphere_body_def.type = b2_staticBody;
+		
+		b2ShapeDef sphere_shape_def = b2DefaultShapeDef();
+		//sphere_shape_def.isSensor = true;
+		//sphere_shape_def.enableSensorEvents = true;
 
-			ball_entity->transform.scale = vec2f{2, 2};
-			ball_entity->transform.rotation = 0;
+		sphere_shape_def.density = 1;
+		sphere_shape_def.enableHitEvents = true;
+		sphere_shape_def.enableContactEvents = true;
+		sphere_shape_def.filter.categoryBits = COLLISION_FILTER_SCORE_OBSTACLE;
+		sphere_shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
 
-			vec2f size = itu_lib_sprite_get_world_size(context, &ball_entity->sprite, &ball_entity->transform);
-			vec2f offset = -mul_element_wise(size, ball_entity->sprite.pivot - vec2f{ 0.5f, 0.5f });
+		Entity* sphere_entity = new Entity();
 
-			b2Circle ball_circle;
-			ball_circle.radius = 1.0f;
-			ball_circle.center = value_cast(b2Vec2, offset);
-			hole_body_def.position = b2Vec2{0,0};
-			ball_entity->body_id = b2CreateBody(state->world_id, &hole_body_def);
-			
-			entity_create(state, ball_entity, ball_entity->body_id);
+		sphere_entity->transform.scale = vec2f{2, 2};
+		sphere_entity->transform.rotation = 0;
 
-			b2ShapeId col_id = b2CreateCircleShape(ball_entity->body_id, &hole_shape_def, &ball_circle);
+		vec2f size = itu_lib_sprite_get_world_size(context, &sphere_entity->sprite, &sphere_entity->transform);
+		vec2f offset = -mul_element_wise(size, sphere_entity->sprite.pivot - vec2f{ 0.5f, 0.5f });
 
-			itu_lib_sprite_init(
-				&ball_entity->sprite,
-				state->atlas,
-				itu_lib_sprite_get_source_rect(7, 7, 16, 16)
-			);		
+		b2Circle sphere_circle;
+		sphere_circle.radius = 1.0f;
+		sphere_circle.center = value_cast(b2Vec2, offset);
+		sphere_body_def.position = b2Vec2{0,0};
+		sphere_entity->body_id = b2CreateBody(state->world_id, &sphere_body_def);
+		
+		entity_create(state, sphere_entity, sphere_entity->body_id);
 
+		b2CreateCircleShape(sphere_entity->body_id, &sphere_shape_def, &sphere_circle);
+
+		itu_lib_sprite_init(
+			&sphere_entity->sprite,
+			state->atlas,
+			itu_lib_sprite_get_source_rect(7, 7, 16, 16)
+		);		
 	}
 
+	// walls
+
+    b2BodyDef  wall_body_def  = b2DefaultBodyDef();
+    b2ShapeDef wall_shape_def = b2DefaultShapeDef();
+    b2Polygon  wall_horizontal = b2MakeBox(5.5f, 0.1f);
+	b2Polygon  wall_between_launcher   = b2MakeBox(0.1f, 7.0f);
+    b2Polygon  wall_vertical   = b2MakeBox(0.1f, 8.0f);
+    b2Polygon  wall_inside     = b2MakeBox(1.5f, 0.1f);
+	b2Polygon  wall_corner     = b2MakeBox(1.0f, 0.1f);
+
+	
+	wall_shape_def.enableHitEvents = true;
+	wall_shape_def.enableContactEvents = true;
+	wall_shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
+	wall_shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
+
+    wall_body_def.position = b2Vec2{0.5f, 8.0f};
+    b2BodyId wall_top_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_top_id, &wall_shape_def, &wall_horizontal);
+
+    wall_body_def.position = b2Vec2{0.5f, -8.0f};
+    b2BodyId wall_bottom_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_bottom_id, &wall_shape_def, &wall_horizontal);
+
+    wall_body_def.position = b2Vec2{-5.0f, 0.0f};
+    b2BodyId wall_left_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_left_id, &wall_shape_def, &wall_vertical);
+
+	wall_body_def.position = b2Vec2{5.0f, -1.0f};
+    b2BodyId wall_between_launcher_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_between_launcher_id, &wall_shape_def, &wall_between_launcher);
+
+    wall_body_def.position = b2Vec2{6.0f, 0.0f};
+    b2BodyId wall_right_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_right_id, &wall_shape_def, &wall_vertical);
+	
+	wall_body_def.position = b2Vec2{5.5f, 7.5f};
+	wall_body_def.rotation = b2MakeRot(-DEG_2_RAD * 45.0f);
+    b2BodyId wall_corner_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_corner_id, &wall_shape_def, &wall_corner);
+
+    wall_body_def.position = b2Vec2{-4.0f, -3.0f};
+    wall_body_def.rotation = b2MakeRot(-0.7f);
+    b2BodyId wall_inside_left_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_inside_left_id, &wall_shape_def, &wall_inside);
+
+    wall_body_def.position = b2Vec2{4.0f, -3.0f};
+    wall_body_def.rotation = b2MakeRot(0.7f);
+    b2BodyId wall_inside_right_id = b2CreateBody(state->world_id, &wall_body_def);
+    b2CreatePolygonShape(wall_inside_right_id, &wall_shape_def, &wall_inside);
+	
+    // flippers
+    
+    b2BodyDef  flipper_body_def  = b2DefaultBodyDef();
+    b2ShapeDef flipper_shape_def = b2DefaultShapeDef();
+    b2Polygon  flipper = b2MakeBox(1.0f, 0.1f);
+	Entity*    flipper_left_entity  = new Entity();
+	Entity*    flipper_right_entity = new Entity();
+
+	flipper_shape_def.enableHitEvents = true;
+	flipper_shape_def.enableContactEvents = true;
+	flipper_shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
+	flipper_shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
+
+    flipper_body_def.type = b2_dynamicBody;
+    flipper_shape_def.density = 1.0f;
+    flipper_shape_def.material.friction = 0.0f;
+
+    flipper_body_def.position = b2Vec2{-2.2f, -4.5f};
+    flipper_body_def.rotation = b2MakeRot(-0.7f);
+    flipper_left_entity->body_id = b2CreateBody(state->world_id, &flipper_body_def);
+    b2CreatePolygonShape(flipper_left_entity->body_id, &flipper_shape_def, &flipper);
+	entity_create(state, flipper_left_entity, flipper_left_entity->body_id);
+	state->flipper_left_id = &flipper_left_entity->body_id;
+	
+    flipper_body_def.position = b2Vec2{2.2f, -4.5f};
+    flipper_body_def.rotation = b2MakeRot(0.7f);
+    flipper_right_entity->body_id = b2CreateBody(state->world_id, &flipper_body_def);
+    b2CreatePolygonShape(flipper_right_entity->body_id, &flipper_shape_def, &flipper);
+	entity_create(state, flipper_right_entity, flipper_right_entity->body_id);
+	state->flipper_right_id = &flipper_right_entity->body_id;
+
+    // joints
+	
+    b2RevoluteJointDef joint_def = b2DefaultRevoluteJointDef();
+    joint_def.enableLimit = true;
+
+    joint_def.bodyIdA = wall_inside_left_id;
+    joint_def.bodyIdB = flipper_left_entity->body_id;
+    joint_def.localAnchorA = {1.5f, 0.0f};
+    joint_def.localAnchorB = {-1.0f, 0.0f};
+    joint_def.lowerAngle = 0.0f;
+    joint_def.upperAngle = 1.5f;
+    b2JointId jointLeftId = b2CreateRevoluteJoint(state->world_id, &joint_def);
+
+    joint_def.bodyIdA = wall_inside_right_id;
+    joint_def.bodyIdB = flipper_right_entity->body_id;
+    joint_def.localAnchorA = {-1.5f, 0.0f};
+    joint_def.localAnchorB = {1.0f, 0.0f};
+    joint_def.lowerAngle = -1.5f;
+    joint_def.upperAngle = 0.0f;
+    b2JointId jointRightId = b2CreateRevoluteJoint(state->world_id, &joint_def);
+
+	debug_draw.context = context;
+	debug_draw.drawShapes = true;
+	debug_draw.DrawSolidPolygonFcn = fn_box2d_wrapper_draw_polygon;
+	debug_draw.DrawSolidCircleFcn  = fn_box2d_wrapper_draw_circle;
 }
 
 
@@ -232,6 +399,12 @@ static void game_update(EngineContext* context, PinballGameState* state)
 		return;
 
 	bool key_down = context->btn_isdown[BTN_TYPE_ACTION_0];
+
+	if(context->btn_isdown[BTN_TYPE_LEFT])
+		b2Body_ApplyAngularImpulse(*state->flipper_left_id, 5.0f, true);
+
+	if(context->btn_isdown[BTN_TYPE_RIGHT])
+		b2Body_ApplyAngularImpulse(*state->flipper_right_id, -5.0f, true);
 
 	if(key_down)
 	{
@@ -341,6 +514,39 @@ static void game_render(EngineContext* context, PinballGameState* state)
 	ImGui::End();
 }
 
+static void game_render_2(EngineContext* context, PinballGameState* state)
+{
+    itu_lib_render_draw_world_grid(context);
+
+    if(context->btn_isjustpressed[BTN_TYPE_DEBUG_F1]) DEBUG_render_textures = !DEBUG_render_textures;
+    if(context->btn_isjustpressed[BTN_TYPE_DEBUG_F2]) DEBUG_render_outlines = !DEBUG_render_outlines;
+    if(context->btn_isjustpressed[BTN_TYPE_DEBUG_F3]) DEBUG_physics = !DEBUG_physics;
+
+    // entities
+    for(auto pair : state->entities)
+    {
+        Entity * entity = pair.second;
+        // render texture
+        SDL_FRect rect_src = entity->sprite.rect;	
+        SDL_FRect rect_dst;
+
+        if(DEBUG_render_textures)
+            itu_lib_sprite_render(context, &entity->sprite, &entity->transform);
+
+        if(DEBUG_render_outlines)
+            itu_lib_sprite_render_debug(context, &entity->sprite, &entity->transform);
+    }
+
+    if(DEBUG_physics)
+        b2World_Draw(state->world_id, &debug_draw);
+
+    // debug window
+    itu_lib_render_draw_world_point(context, VEC2F_ZERO, 10, color { 1, 0, 1, 1 });
+
+    SDL_SetRenderDrawColor(context->renderer, 0xFF, 0x00, 0xFF, 0xff);
+    SDL_RenderRect(context->renderer, NULL);
+}
+
 
 int main(void)
 {
@@ -388,8 +594,8 @@ int main(void)
 			}
 		}
 
-		game_render(&context, &state);
-
+		//game_render(&context, &state);
+		game_render_2(&context, &state);
 		itu_lib_imgui_frame_end(&context);
 		SDL_RenderPresent(context.renderer);
 		itu_lib_context_frame_timing_update(&context);
