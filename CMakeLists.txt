@@ -14,6 +14,8 @@ set(INCLUDE_DIRS "" CACHE INTERNAL "INCLUDE_DIRS")
 add_subdirectory(lib)
 
 set(INCLUDE_DIRS ${INCLUDE_DIRS};${CMAKE_SOURCE_DIR}/extra_dependencies/itu)
+set(INCLUDE_DIRS ${INCLUDE_DIRS};${CMAKE_SOURCE_DIR}/extra_dependencies/GameObjects)
+
 
 add_subdirectory(src)
 
