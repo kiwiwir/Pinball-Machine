@@ -1,18 +1,24 @@
 #include <itu_engine.hpp>
 #include <gameObjectsLib.hpp>
 
+
+
 const float GRAVITY = -9.8f;
 
 const int COLLISION_FILTER_PLAYER         = 0b00001;
 const int COLLISION_FILTER_SCORE_OBSTACLE = 0b00010;
 const int COLLISION_FILTER_OBSTACLE		  = 0b00100;
+
 const int ENTITY_COUNT = 1000;
 const float ball_radius          = 0.4f;
-const float launcher_width       = 1.0f;
+/*const float launcher_width       = 1.0f;
 const float launcher_height      = 3.0f;   // height of the launcher when it is not charged
 const float launcher_compression = 1.8f;   // how much the launcher shrinks at maximum charge
 const float launcher_margin      = 1.0f;   // distance between the launcher center and the right window edge
-const float launcher_bottom_y    = -8.0f;  // fixed bottom of the launcher (world space)
+const float launcher_bottom_y    = -8.0f;  // fixed bottom of the launcher (world space)*/
+
+const vec2f LAUNCHER_START_POS = {5.5, -6};
+
 
 const float power_min    = 5.0f;
 const float power_max    = 40.0f;
@@ -58,8 +64,9 @@ struct PinballGameState
 	bool  request_reset;
 
 	vec2f    ball_position;
-	b2BodyId ball_body_id;
+	b2BodyId* ball_body_id;
 
+	b2BodyId* launcher_body_id;
 	b2BodyId* flipper_left_id;
 	b2BodyId* flipper_right_id;
 
@@ -69,23 +76,10 @@ struct PinballGameState
 	map<b2BodyId, Entity*> entities;
 	list<b2ShapeId> shape_ids;
 	int entities_alive_count;
+
+	int score;
+
 };
-
-// visible world bounds
-static void get_world_bounds(EngineContext* context, vec2f* out_min, vec2f* out_max)
-{
-	Camera* camera = context->camera_active;
-	vec2f half = vec2f { context->sdl_window_w, context->sdl_window_h } / (camera->pixels_per_unit * camera->zoom * 2);
-	*out_min = camera->world_position - half;
-	*out_max = camera->world_position + half;
-}
-
-static float launcher_x(EngineContext* context)
-{
-	vec2f bmin, bmax;
-	get_world_bounds(context, &bmin, &bmax);
-	return bmax.x - launcher_margin;
-}
 
 // 0 = not charged, 1 = fully charged
 static float launcher_charge_t(PinballGameState* state)
@@ -93,17 +87,10 @@ static float launcher_charge_t(PinballGameState* state)
 	return (state->power - power_min) / (power_max - power_min);
 }
 
-static float launcher_current_height(PinballGameState* state)
+/*static float launcher_current_height(PinballGameState* state)
 {
 	return launcher_height - launcher_charge_t(state) * launcher_compression;
-}
-
-// ball center position while it rests on top of the launcher
-static vec2f ball_rest_position(EngineContext* context, PinballGameState* state)
-{
-	float top_y = launcher_bottom_y + launcher_current_height(state);
-	return vec2f { launcher_x(context), top_y + ball_radius };
-}
+}*/
 
 
 static void entity_create(PinballGameState* state, Entity * entity, b2BodyId bodyId)
@@ -176,15 +163,17 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	state->charging = false;
 	state->power = power_min;
 	state->request_reset = false;
-	state->ball_position = ball_rest_position(context, state);
+	state->score = 0;
 
 	// launcher:
 	b2BodyDef launcher_body_def = b2DefaultBodyDef();
-	launcher_body_def.type      = b2_kinematicBody;
+	launcher_body_def.type      = b2_dynamicBody;
 	launcher_body_def.position  = {5.5, -6};
+	launcher_body_def.fixedRotation = true;
 	
 	b2ShapeDef launcher_shape_def = b2DefaultShapeDef();
 	launcher_shape_def.density = 1;
+	launcher_shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
 
 	Entity* launcher_entity = new Entity();
 	launcher_entity->transform.scale = vec2f{1, 1};
@@ -193,13 +182,14 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	b2Polygon launcher_polygon = b2MakeBox(0.5f, 2.0f);
 	
 	launcher_entity->body_id = b2CreateBody(state->world_id, &launcher_body_def);
+	state->launcher_body_id = &launcher_entity->body_id;
 
 	b2CreatePolygonShape(launcher_entity->body_id, &launcher_shape_def, &launcher_polygon);
 
 	// ball: dynamic body, disabled while it rests on the launcher
 	b2BodyDef body_def = b2DefaultBodyDef();
 	body_def.type      = b2_dynamicBody;
-	body_def.position  = value_cast(b2Vec2, state->ball_position);
+	body_def.position = b2Vec2{5.5f, 0.0f};
 	body_def.isEnabled = true;
 
 	b2ShapeDef shape_def = b2DefaultShapeDef();
@@ -216,10 +206,9 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 
 	
 	circle.center = value_cast(b2Vec2, offset);
-	body_def.position = b2Vec2{-2,0};
 	ball_entity->body_id = b2CreateBody(state->world_id, &body_def);
+	state->ball_body_id = &ball_entity->body_id;
 
-	state->ball_body_id = b2CreateBody(state->world_id, &body_def);
 	//b2CreateCircleShape(state->ball_body_id, &shape_def, &circle);
 	
 	shape_def.density = 1;
@@ -252,7 +241,6 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 		sphere_shape_def.enableHitEvents = true;
 		sphere_shape_def.enableContactEvents = true;
 		sphere_shape_def.filter.categoryBits = COLLISION_FILTER_SCORE_OBSTACLE;
-		sphere_shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
 
 		Entity* sphere_entity = new Entity();
 
@@ -286,8 +274,8 @@ static void game_reset(EngineContext* context, PinballGameState* state)
     b2Polygon  wall_horizontal = b2MakeBox(5.5f, 0.1f);
 	b2Polygon  wall_between_launcher   = b2MakeBox(0.1f, 7.0f);
     b2Polygon  wall_vertical   = b2MakeBox(0.1f, 8.0f);
-    b2Polygon  wall_inside     = b2MakeBox(1.5f, 0.1f);
-	b2Polygon  wall_corner     = b2MakeBox(1.0f, 0.1f);
+    b2Polygon  wall_inside     = b2MakeBox(1.3f, 0.1f);
+	b2Polygon  wall_corner     = b2MakeBox(0.8f, 0.1f);
 
 	
 	wall_shape_def.enableHitEvents = true;
@@ -386,6 +374,21 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	debug_draw.drawShapes = true;
 	debug_draw.DrawSolidPolygonFcn = fn_box2d_wrapper_draw_polygon;
 	debug_draw.DrawSolidCircleFcn  = fn_box2d_wrapper_draw_circle;
+
+	// launcher joint
+
+	b2DistanceJointDef launcher_joint_def = b2DefaultDistanceJointDef();
+
+	launcher_joint_def.bodyIdA = wall_bottom_id;
+    launcher_joint_def.bodyIdB = launcher_entity->body_id;
+	launcher_joint_def.localAnchorA = {5.0f, 0.0f};
+    launcher_joint_def.localAnchorB = {0.0f, -3.0f};
+	launcher_joint_def.collideConnected = true;
+	launcher_joint_def.enableSpring = true;
+	launcher_joint_def.hertz = 2.0f;
+	launcher_joint_def.dampingRatio = 0.5f;
+
+	b2JointId launcher_joint_id = b2CreateDistanceJoint(state->world_id, &launcher_joint_def);
 }
 
 
@@ -398,23 +401,27 @@ static void game_update(EngineContext* context, PinballGameState* state)
 	if(state->phase != LAUNCHER_PHASE_READY)
 		return;
 
-	bool key_down = context->btn_isdown[BTN_TYPE_ACTION_0];
-
 	if(context->btn_isdown[BTN_TYPE_LEFT])
 		b2Body_ApplyAngularImpulse(*state->flipper_left_id, 5.0f, true);
 
 	if(context->btn_isdown[BTN_TYPE_RIGHT])
 		b2Body_ApplyAngularImpulse(*state->flipper_right_id, -5.0f, true);
 
-	if(key_down)
+	if(context->btn_isdown[BTN_TYPE_ACTION_0])
+		//b2Body_ApplyLinearImpulseToCenter(*state->ball_body_id, b2Vec2{0.0f, 2.0f}, true);
+		b2Body_ApplyLinearImpulseToCenter(*state->launcher_body_id, b2Vec2{0.0f, -60.0f}, true);
+
+	
+	//bool key_down = context->btn_isdown[BTN_TYPE_ACTION_0];
+	/*if(key_down)
 	{
 		// charging
 		state->charging = true;
 		state->power += charge_speed * context->delta;
 		state->power = SDL_clamp(state->power, power_min, power_max);
 
-		// the ball follows the top of the launcher
-		state->ball_position = ball_rest_position(context, state);
+		float charge = launcher_charge_t(state);
+		
 	}
 	else if(state->charging)
 	{
@@ -427,7 +434,37 @@ static void game_update(EngineContext* context, PinballGameState* state)
 		state->phase    = LAUNCHER_PHASE_BALL_IN_PLAY;
 		state->charging = false;
 		state->power    = power_min; // the spring goes back to its resting state
+	}*/
+	
+	{
+		b2ContactEvents contact_events = b2World_GetContactEvents(state->world_id);
+
+		b2ContactHitEvent * hitevents = contact_events.hitEvents;
+
+		if(b2World_GetContactEvents(state->world_id).hitCount > 0)
+		{
+			//SDL_Log("HIT COUNTS: %i", b2World_GetContactEvents(state->world_id).hitCount);
+			b2ContactHitEvent * hitEvents = b2World_GetContactEvents(state->world_id).hitEvents;
+			
+			for(int i = 0; i < b2World_GetContactEvents(state->world_id).hitCount; ++i){
+				b2ContactHitEvent event = hitEvents[i];
+
+				b2Filter filter_a = b2Shape_GetFilter(event.shapeIdA);
+				b2Filter filter_b = b2Shape_GetFilter(event.shapeIdB);
+				if(filter_a.categoryBits & COLLISION_FILTER_SCORE_OBSTACLE){
+					state->score += 10;
+					
+					SDL_Log("SCORE: %i", state->score);
+					break;
+				}
+			}
+		}
+		if(contact_events.beginCount > 0){
+			//SDL_Log("SOMETHING TOUCHED %i", contact_events.beginCount);
+		}
+		
 	}
+
 	// NOTE: we are compouding precision errors here (config specifies frequency in steps per second, we convert to period in nanos,
 	//       and here we convert back to seconds), but specifying what you want once and expressing everything else in function of
 	//       it avoids mismatching. A more advanced implementation would have independent loop frequencies for game and physics and
@@ -439,82 +476,7 @@ static void game_update(EngineContext* context, PinballGameState* state)
 
 }
 
-static void game_update_post_physics(EngineContext* context, PinballGameState* state)
-{
-	if(state->phase != LAUNCHER_PHASE_BALL_IN_PLAY)
-		return;
-
-	b2Vec2 pos = b2Body_GetPosition(state->ball_body_id);
-	state->ball_position = value_cast(vec2f, pos);
-
-	// ball outside the window -> reset
-	vec2f bmin, bmax;
-	get_world_bounds(context, &bmin, &bmax);
-	float r = ball_radius;
-	if(pos.x < bmin.x - r || pos.x > bmax.x + r || pos.y < bmin.y - r || pos.y > bmax.y + r)
-		state->request_reset = true;
-}
-
-
-
 static void game_render(EngineContext* context, PinballGameState* state)
-{
-	itu_lib_render_draw_world_grid(context);
-
-	// launcher: (x, y) in world space
-	{
-		float height = launcher_current_height(state);
-		SDL_FRect world_rect;
-		world_rect.x = launcher_x(context) - launcher_width / 2;
-		world_rect.y = launcher_bottom_y;
-		world_rect.w = launcher_width;
-		world_rect.h = height;
-
-		SDL_FRect r = itu_lib_context_rect_global_to_screen(context, world_rect);
-		itu_lib_render_screen_rect_fill(context->renderer, vec2f { r.x, r.y }, vec2f { r.w, r.h }, color { 0.7f, 0.7f, 0.8f, 1.0f });
-	}
-
-
-
-	// ball (filled polygon for now)
-	{
-		const int vertex_count = 12;
-		float radius_px = itu_lib_context_size_global_to_screen(context, ball_radius);
-		vec2f vertices[vertex_count];
-		for(int i = 0; i < vertex_count; ++i)
-		{
-			float angle = TAU * i / vertex_count;
-			vertices[i] = vec2f { radius_px * SDL_cosf(angle), radius_px * SDL_sinf(angle) };
-		}
-		itu_lib_render_draw_world_polygon(context, state->ball_position, vertices, vertex_count, COLOR_YELLOW);
-	}
-
-	// sphere obstacle (filled polygon for now)
-	{
-		for (auto pair : state->entities)
-		{
-			pair.second->transform;
-			const int vertex_count = 12;
-			float radius_px = itu_lib_context_size_global_to_screen(context, ball_radius);
-			vec2f vertices[vertex_count];
-			for(int i = 0; i < vertex_count; ++i)
-			{
-				float angle = TAU * i / vertex_count;
-				vertices[i] = vec2f { radius_px * SDL_cosf(angle), radius_px * SDL_sinf(angle) };
-			}
-			itu_lib_render_draw_world_polygon(context, pair.second->transform.position, vertices, vertex_count, COLOR_BLUE);
-		}
-	}
-
-	// debug UI
-	ImGui::Begin("launcher");
-	ImGui::Text("phase : %s", state->phase == LAUNCHER_PHASE_READY ? "READY" : "BALL_IN_PLAY");
-	ImGui::Text("power : %.2f", state->power);
-	ImGui::ProgressBar(launcher_charge_t(state));
-	ImGui::End();
-}
-
-static void game_render_2(EngineContext* context, PinballGameState* state)
 {
     itu_lib_render_draw_world_grid(context);
 
@@ -537,6 +499,36 @@ static void game_render_2(EngineContext* context, PinballGameState* state)
             itu_lib_sprite_render_debug(context, &entity->sprite, &entity->transform);
     }
 
+	{
+		TTF_Font* Sans = TTF_OpenFont("Sans.ttf", 24);
+
+		SDL_Color White = {255, 255, 255};
+
+		string scoreString = "SCORE " + state->score;
+		int value = scoreString.length();
+
+		const char *cstr = scoreString.c_str();
+
+
+		SDL_Surface* surfaceMessage =
+			TTF_RenderText_Solid(Sans, cstr, 24, White); 
+
+		SDL_Texture* Message = SDL_CreateTextureFromSurface(context->renderer, surfaceMessage);
+
+		SDL_FRect Message_rect; 
+		Message_rect.x = 0;  
+		Message_rect.y = 0; 
+		Message_rect.w = 100; 
+		Message_rect.h = 100;
+
+		SDL_RenderTexture(context->renderer, Message, NULL, &Message_rect);
+
+		SDL_DestroySurface(surfaceMessage);
+		SDL_DestroyTexture(Message);
+	}
+
+	
+
     if(DEBUG_physics)
         b2World_Draw(state->world_id, &debug_draw);
 
@@ -545,6 +537,8 @@ static void game_render_2(EngineContext* context, PinballGameState* state)
 
     SDL_SetRenderDrawColor(context->renderer, 0xFF, 0x00, 0xFF, 0xff);
     SDL_RenderRect(context->renderer, NULL);
+
+
 }
 
 
@@ -589,13 +583,10 @@ int main(void)
 				b2World_Step(state.world_id, NS_TO_SECONDS(context.target_framerate_fixed_ns), 4);
 				++context.physics_steps_per_frame_count;
 				context.accumulator_physics -= context.target_framerate_fixed_ns;
-
-				game_update_post_physics(&context, &state);
 			}
 		}
 
-		//game_render(&context, &state);
-		game_render_2(&context, &state);
+		game_render(&context, &state);
 		itu_lib_imgui_frame_end(&context);
 		SDL_RenderPresent(context.renderer);
 		itu_lib_context_frame_timing_update(&context);
