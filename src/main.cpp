@@ -1,7 +1,7 @@
 #include <itu_engine.hpp>
 #include <gameObjectsLib.hpp>
-
-
+#include <optional>
+#include <algorithm>
 
 const float GRAVITY = -9.8f;
 
@@ -66,9 +66,9 @@ struct PinballGameState
 	vec2f    ball_position;
 	b2BodyId* ball_body_id;
 
-	b2BodyId* launcher_body_id;
-	b2BodyId* flipper_left_id;
-	b2BodyId* flipper_right_id;
+	b2BodyId launcher_body_id;
+	b2BodyId flipper_left_id;
+	b2BodyId flipper_right_id;
 
 	b2WorldId world_id;
 	SDL_Texture* atlas;
@@ -149,6 +149,131 @@ static void game_init(EngineContext* context, PinballGameState* state)
 	state->world_id = { 0 };
 }
 
+static b2BodyId create_static_box(PinballGameState* state, vec2f position, vec2f size, optional<float> rotation = 0)
+{
+	b2BodyDef  body_def  = b2DefaultBodyDef();
+    b2ShapeDef shape_def = b2DefaultShapeDef();
+    b2Polygon  polygon   = b2MakeBox(size.x, size.y);
+	Entity*    entity    = new Entity();
+
+	body_def.position = b2Vec2{position.x, position.y};
+    body_def.rotation = b2MakeRot(-DEG_2_RAD * *rotation);
+
+	shape_def.enableHitEvents     = true;
+	shape_def.enableContactEvents = true;
+	shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
+	shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
+
+    entity->body_id = b2CreateBody(state->world_id, &body_def);
+    b2CreatePolygonShape(entity->body_id, &shape_def, &polygon);
+	entity_create(state, entity, entity->body_id);
+	
+	return entity->body_id;
+}
+
+static b2BodyId create_dynamic_box(PinballGameState* state, vec2f position, vec2f size, optional<float> rotation = 0)
+{
+	b2BodyDef  body_def  = b2DefaultBodyDef();
+    b2ShapeDef shape_def = b2DefaultShapeDef();
+    b2Polygon  polygon   = b2MakeBox(size.x, size.y);
+	Entity*    entity    = new Entity();
+
+	body_def.type     = b2_dynamicBody;
+	body_def.position = b2Vec2{position.x, position.y};
+    body_def.rotation = b2MakeRot(-DEG_2_RAD * *rotation);
+
+	shape_def.density 			  = 1.0f;
+    shape_def.material.friction   = 0.0f;
+	shape_def.enableHitEvents     = true;
+	shape_def.enableContactEvents = true;
+	shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
+	shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
+
+    entity->body_id = b2CreateBody(state->world_id, &body_def);
+    b2CreatePolygonShape(entity->body_id, &shape_def, &polygon);
+	entity_create(state, entity, entity->body_id);
+	
+	return entity->body_id;
+}
+
+static b2JointId create_joint_revolving(PinballGameState* state, b2BodyId a_body_id, vec2f a_point, optional<b2BodyId> b_body_id, vec2f b_point, optional<vec2f> limits = nullopt)
+{
+	b2RevoluteJointDef joint_def = b2DefaultRevoluteJointDef();
+
+	if (!b_body_id)
+	{
+		b2BodyDef b_body_def = b2DefaultBodyDef();
+		b_body_def.position = {b_point.x, b_point.y};
+		b_body_def.rotation = b2Body_GetRotation(a_body_id);
+		b_body_id = b2CreateBody(state->world_id, &b_body_def);
+		b_point = VEC2F_ZERO;
+	}
+
+	if (limits)
+	{
+		joint_def.enableLimit = true;
+		joint_def.lowerAngle = (-DEG_2_RAD * limits->x);
+		joint_def.upperAngle = (-DEG_2_RAD * limits->y);
+	}
+
+    joint_def.bodyIdA = a_body_id;
+    joint_def.bodyIdB = *b_body_id;
+    joint_def.localAnchorA = {a_point.x, a_point.y};
+    joint_def.localAnchorB = {b_point.x, b_point.y};
+
+    return b2CreateRevoluteJoint(state->world_id, &joint_def);
+}
+
+static b2JointId create_joint_springing(PinballGameState* state, b2BodyId a_body_id, vec2f a_point, optional<b2BodyId> b_body_id, vec2f b_point)
+{
+	b2DistanceJointDef joint_def = b2DefaultDistanceJointDef();
+
+	if (!b_body_id)
+	{
+		b2BodyDef b_body_def = b2DefaultBodyDef();
+		b_body_def.position = {b_point.x, b_point.y};
+		b_body_def.rotation = b2Body_GetRotation(a_body_id);
+		b_body_id = b2CreateBody(state->world_id, &b_body_def);
+		b_point = VEC2F_ZERO;
+	}
+
+	joint_def.enableSpring = true;
+	joint_def.collideConnected = true;
+	joint_def.hertz = 2.0f;
+	joint_def.dampingRatio = 0.5f;
+
+    joint_def.bodyIdA = a_body_id;
+    joint_def.bodyIdB = *b_body_id;
+    joint_def.localAnchorA = {a_point.x, a_point.y};
+    joint_def.localAnchorB = {b_point.x, b_point.y};
+
+    return b2CreateDistanceJoint(state->world_id, &joint_def);
+}
+
+static b2JointId create_joint_axislock(PinballGameState* state, b2BodyId a_body_id, char axis)
+{
+	b2PrismaticJointDef joint_def = b2DefaultPrismaticJointDef();
+
+	b2BodyDef b_body_def = b2DefaultBodyDef();
+	b_body_def.position = b2Body_GetPosition(a_body_id);
+	auto b_body_id = b2CreateBody(state->world_id, &b_body_def);
+
+	switch (axis)
+	{
+		case 'x':
+			joint_def.localAxisA = { 1.0f, 0.0f };
+			break;
+		case 'y':
+			joint_def.localAxisA = { 0.0f, 1.0f };
+			break;
+	}
+
+    joint_def.bodyIdA = a_body_id;
+    joint_def.bodyIdB = b_body_id;
+
+    return b2CreatePrismaticJoint(state->world_id, &joint_def);
+}
+
 static void game_reset(EngineContext* context, PinballGameState* state)
 {
 	if(b2World_IsValid(state->world_id))
@@ -164,27 +289,6 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	state->power = power_min;
 	state->request_reset = false;
 	state->score = 0;
-
-	// launcher:
-	b2BodyDef launcher_body_def = b2DefaultBodyDef();
-	launcher_body_def.type      = b2_dynamicBody;
-	launcher_body_def.position  = {5.5, -6};
-	launcher_body_def.fixedRotation = true;
-	
-	b2ShapeDef launcher_shape_def = b2DefaultShapeDef();
-	launcher_shape_def.density = 1;
-	launcher_shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
-
-	Entity* launcher_entity = new Entity();
-	launcher_entity->transform.scale = vec2f{1, 1};
-	launcher_entity->transform.rotation = 0;
-
-	b2Polygon launcher_polygon = b2MakeBox(0.5f, 2.0f);
-	
-	launcher_entity->body_id = b2CreateBody(state->world_id, &launcher_body_def);
-	state->launcher_body_id = &launcher_entity->body_id;
-
-	b2CreatePolygonShape(launcher_entity->body_id, &launcher_shape_def, &launcher_polygon);
 
 	// ball: dynamic body, disabled while it rests on the launcher
 	b2BodyDef body_def = b2DefaultBodyDef();
@@ -269,126 +373,36 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 
 	// walls
 
-    b2BodyDef  wall_body_def  = b2DefaultBodyDef();
-    b2ShapeDef wall_shape_def = b2DefaultShapeDef();
-    b2Polygon  wall_horizontal = b2MakeBox(5.5f, 0.1f);
-	b2Polygon  wall_between_launcher   = b2MakeBox(0.1f, 7.0f);
-    b2Polygon  wall_vertical   = b2MakeBox(0.1f, 8.0f);
-    b2Polygon  wall_inside     = b2MakeBox(1.3f, 0.1f);
-	b2Polygon  wall_corner     = b2MakeBox(0.8f, 0.1f);
+	create_static_box(state, {0.5f, 8.0f}, {5.5f, 0.1f});
+	create_static_box(state, {0.5f, -8.0f}, {5.5f, 0.1f});
+	create_static_box(state, {-5.0f, 0.0f}, {0.1f, 8.0f});
+	create_static_box(state, {5.0f, -1.0f}, {0.1f, 7.0f});
+	create_static_box(state, {6.0f, 0.0f}, {0.1f, 8.0f});
+	create_static_box(state, {5.5f, 7.5f}, {0.8f, 0.1f}, 45);
+	create_static_box(state, {-4.0f, -3.0f}, {1.3f, 0.1f}, 40);
+	create_static_box(state, {4.0f, -3.0f}, {1.3f, 0.1f}, -40);
 
-	
-	wall_shape_def.enableHitEvents = true;
-	wall_shape_def.enableContactEvents = true;
-	wall_shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
-	wall_shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
-
-    wall_body_def.position = b2Vec2{0.5f, 8.0f};
-    b2BodyId wall_top_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_top_id, &wall_shape_def, &wall_horizontal);
-
-    wall_body_def.position = b2Vec2{0.5f, -8.0f};
-    b2BodyId wall_bottom_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_bottom_id, &wall_shape_def, &wall_horizontal);
-
-    wall_body_def.position = b2Vec2{-5.0f, 0.0f};
-    b2BodyId wall_left_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_left_id, &wall_shape_def, &wall_vertical);
-
-	wall_body_def.position = b2Vec2{5.0f, -1.0f};
-    b2BodyId wall_between_launcher_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_between_launcher_id, &wall_shape_def, &wall_between_launcher);
-
-    wall_body_def.position = b2Vec2{6.0f, 0.0f};
-    b2BodyId wall_right_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_right_id, &wall_shape_def, &wall_vertical);
-	
-	wall_body_def.position = b2Vec2{5.5f, 7.5f};
-	wall_body_def.rotation = b2MakeRot(-DEG_2_RAD * 45.0f);
-    b2BodyId wall_corner_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_corner_id, &wall_shape_def, &wall_corner);
-
-    wall_body_def.position = b2Vec2{-4.0f, -3.0f};
-    wall_body_def.rotation = b2MakeRot(-0.7f);
-    b2BodyId wall_inside_left_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_inside_left_id, &wall_shape_def, &wall_inside);
-
-    wall_body_def.position = b2Vec2{4.0f, -3.0f};
-    wall_body_def.rotation = b2MakeRot(0.7f);
-    b2BodyId wall_inside_right_id = b2CreateBody(state->world_id, &wall_body_def);
-    b2CreatePolygonShape(wall_inside_right_id, &wall_shape_def, &wall_inside);
-	
     // flippers
-    
-    b2BodyDef  flipper_body_def  = b2DefaultBodyDef();
-    b2ShapeDef flipper_shape_def = b2DefaultShapeDef();
-    b2Polygon  flipper = b2MakeBox(1.0f, 0.1f);
-	Entity*    flipper_left_entity  = new Entity();
-	Entity*    flipper_right_entity = new Entity();
 
-	flipper_shape_def.enableHitEvents = true;
-	flipper_shape_def.enableContactEvents = true;
-	flipper_shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
-	flipper_shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
-
-    flipper_body_def.type = b2_dynamicBody;
-    flipper_shape_def.density = 1.0f;
-    flipper_shape_def.material.friction = 0.0f;
-
-    flipper_body_def.position = b2Vec2{-2.2f, -4.5f};
-    flipper_body_def.rotation = b2MakeRot(-0.7f);
-    flipper_left_entity->body_id = b2CreateBody(state->world_id, &flipper_body_def);
-    b2CreatePolygonShape(flipper_left_entity->body_id, &flipper_shape_def, &flipper);
-	entity_create(state, flipper_left_entity, flipper_left_entity->body_id);
-	state->flipper_left_id = &flipper_left_entity->body_id;
+	state->flipper_left_id = create_dynamic_box(state, {-2.2f, -4.5f}, {1.1f, 0.1f}, 40);
+	state->flipper_right_id = create_dynamic_box(state, {2.2f, -4.5f}, {1.1f, 0.1f}, 140);
 	
-    flipper_body_def.position = b2Vec2{2.2f, -4.5f};
-    flipper_body_def.rotation = b2MakeRot(0.7f);
-    flipper_right_entity->body_id = b2CreateBody(state->world_id, &flipper_body_def);
-    b2CreatePolygonShape(flipper_right_entity->body_id, &flipper_shape_def, &flipper);
-	entity_create(state, flipper_right_entity, flipper_right_entity->body_id);
-	state->flipper_right_id = &flipper_right_entity->body_id;
+    create_joint_revolving(state, state->flipper_left_id, {-1.1, 0}, nullopt, {-3, -3.8}, vec2f{80, 0});
+	create_joint_revolving(state, state->flipper_right_id, {-1.1, 0}, nullopt, {3, -3.8}, vec2f{0, -80});
 
-    // joints
-	
-    b2RevoluteJointDef joint_def = b2DefaultRevoluteJointDef();
-    joint_def.enableLimit = true;
+	// launcher
 
-    joint_def.bodyIdA = wall_inside_left_id;
-    joint_def.bodyIdB = flipper_left_entity->body_id;
-    joint_def.localAnchorA = {1.5f, 0.0f};
-    joint_def.localAnchorB = {-1.0f, 0.0f};
-    joint_def.lowerAngle = 0.0f;
-    joint_def.upperAngle = 1.5f;
-    b2JointId jointLeftId = b2CreateRevoluteJoint(state->world_id, &joint_def);
+	state->launcher_body_id = create_dynamic_box(state, {5.5f, -6.0f}, {0.5f, 2.1f}, 0);
 
-    joint_def.bodyIdA = wall_inside_right_id;
-    joint_def.bodyIdB = flipper_right_entity->body_id;
-    joint_def.localAnchorA = {-1.5f, 0.0f};
-    joint_def.localAnchorB = {1.0f, 0.0f};
-    joint_def.lowerAngle = -1.5f;
-    joint_def.upperAngle = 0.0f;
-    b2JointId jointRightId = b2CreateRevoluteJoint(state->world_id, &joint_def);
+	create_joint_springing(state, state->launcher_body_id, {0.0f, 0.0f}, nullopt, {5.5f, -5.0f});
+	create_joint_axislock(state, state->launcher_body_id, 'y');
+
+	// debug draw
 
 	debug_draw.context = context;
 	debug_draw.drawShapes = true;
 	debug_draw.DrawSolidPolygonFcn = fn_box2d_wrapper_draw_polygon;
 	debug_draw.DrawSolidCircleFcn  = fn_box2d_wrapper_draw_circle;
-
-	// launcher joint
-
-	b2DistanceJointDef launcher_joint_def = b2DefaultDistanceJointDef();
-
-	launcher_joint_def.bodyIdA = wall_bottom_id;
-    launcher_joint_def.bodyIdB = launcher_entity->body_id;
-	launcher_joint_def.localAnchorA = {5.0f, 0.0f};
-    launcher_joint_def.localAnchorB = {0.0f, -3.0f};
-	launcher_joint_def.collideConnected = true;
-	launcher_joint_def.enableSpring = true;
-	launcher_joint_def.hertz = 2.0f;
-	launcher_joint_def.dampingRatio = 0.5f;
-
-	b2JointId launcher_joint_id = b2CreateDistanceJoint(state->world_id, &launcher_joint_def);
 }
 
 
@@ -398,44 +412,23 @@ static void game_update(EngineContext* context, PinballGameState* state)
 	if(context->btn_isjustpressed[BTN_TYPE_DEBUG_RESET] || state->request_reset)
 		game_reset(context, state);
 
-	if(state->phase != LAUNCHER_PHASE_READY)
-		return;
-
 	if(context->btn_isdown[BTN_TYPE_LEFT])
-		b2Body_ApplyAngularImpulse(*state->flipper_left_id, 5.0f, true);
+		b2Body_ApplyAngularImpulse(state->flipper_left_id, 5.0f, true);
 
 	if(context->btn_isdown[BTN_TYPE_RIGHT])
-		b2Body_ApplyAngularImpulse(*state->flipper_right_id, -5.0f, true);
+		b2Body_ApplyAngularImpulse(state->flipper_right_id, -5.0f, true);
 
 	if(context->btn_isdown[BTN_TYPE_ACTION_0])
-		//b2Body_ApplyLinearImpulseToCenter(*state->ball_body_id, b2Vec2{0.0f, 2.0f}, true);
-		b2Body_ApplyLinearImpulseToCenter(*state->launcher_body_id, b2Vec2{0.0f, -60.0f}, true);
-
-	
-	//bool key_down = context->btn_isdown[BTN_TYPE_ACTION_0];
-	/*if(key_down)
 	{
-		// charging
-		state->charging = true;
-		state->power += charge_speed * context->delta;
-		state->power = SDL_clamp(state->power, power_min, power_max);
-
-		float charge = launcher_charge_t(state);
-		
+		b2Body_ApplyLinearImpulseToCenter(state->launcher_body_id, b2Vec2{0.0f, --state->power}, true);
+		state->power = max(state->power, -60.0f);
 	}
-	else if(state->charging)
-	{
-		// key released -> launch
-		b2Body_Enable(state->ball_body_id);
-		b2Body_SetTransform(state->ball_body_id, value_cast(b2Vec2, state->ball_position), b2MakeRot(0));
-		b2Body_SetLinearVelocity(state->ball_body_id, b2Vec2{ 0, state->power });
-		b2Body_SetAngularVelocity(state->ball_body_id, 0);
-
-		state->phase    = LAUNCHER_PHASE_BALL_IN_PLAY;
-		state->charging = false;
-		state->power    = power_min; // the spring goes back to its resting state
-	}*/
+	else
+		state->power = 0;
 	
+	// ↑ technically this is allowed but lowkey cursed xd
+	
+
 	{
 		b2ContactEvents contact_events = b2World_GetContactEvents(state->world_id);
 
