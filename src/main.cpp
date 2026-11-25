@@ -8,6 +8,7 @@ const float GRAVITY = -9.8f;
 const int COLLISION_FILTER_PLAYER         = 0b00001;
 const int COLLISION_FILTER_SCORE_OBSTACLE = 0b00010;
 const int COLLISION_FILTER_OBSTACLE		  = 0b00100;
+const int COLLISION_KILLER				  = 0b01000;
 
 const int ENTITY_COUNT = 1000;
 const float ball_radius          = 0.4f;
@@ -78,6 +79,7 @@ struct PinballGameState
 	int entities_alive_count;
 
 	int score;
+	int lives;
 
 };
 
@@ -133,6 +135,9 @@ static void entity_destroy(PinballGameState* state, b2BodyId bodyId)
 	--state->entities_alive_count;
 }
 
+
+
+
 static void game_init(EngineContext* context, PinballGameState* state)
 {
 	itu_lib_input_set_mapping_keyboard(context, SDLK_A, BTN_TYPE_LEFT);
@@ -171,6 +176,71 @@ static b2BodyId create_static_box(PinballGameState* state, vec2f position, vec2f
 	return entity->body_id;
 }
 
+static b2BodyId create_kill_zone(PinballGameState* state, vec2f position, vec2f size, optional<float> rotation = 0)
+{
+	b2BodyDef  body_def  = b2DefaultBodyDef();
+    b2ShapeDef shape_def = b2DefaultShapeDef();
+    b2Polygon  polygon   = b2MakeBox(size.x, size.y);
+	Entity*    entity    = new Entity();
+
+	body_def.position = b2Vec2{position.x, position.y};
+    body_def.rotation = b2MakeRot(-DEG_2_RAD * *rotation);
+	shape_def.isSensor 			  = true;
+	shape_def.enableSensorEvents  = true;
+
+	shape_def.filter.categoryBits = COLLISION_KILLER;
+	shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
+
+    entity->body_id = b2CreateBody(state->world_id, &body_def);
+    b2CreatePolygonShape(entity->body_id, &shape_def, &polygon);
+	entity_create(state, entity, entity->body_id);
+	
+	return entity->body_id;
+}
+
+static b2BodyId create_new_ball(PinballGameState* state, EngineContext * context, vec2f position, optional<float> rotation = 0)
+{
+	b2BodyDef  body_def  = b2DefaultBodyDef();
+    b2ShapeDef shape_def = b2DefaultShapeDef();
+    b2Circle circle		 = { { 0, 0 }, ball_radius };
+
+	Entity*    entity    = new Entity();
+	entity->transform.scale = vec2f{1, 1};
+	entity->transform.rotation = *rotation;
+	
+	vec2f Ssize = itu_lib_sprite_get_world_size(context, &entity->sprite, &entity->transform);
+	vec2f offset = -mul_element_wise(Ssize, entity->sprite.pivot - vec2f{ 0.5f, 0.5f });
+	circle.center = value_cast(b2Vec2, offset);
+
+
+	body_def.type      = b2_dynamicBody;
+	body_def.position = b2Vec2{position.x, position.y};
+	body_def.isEnabled = true;
+    body_def.rotation = b2MakeRot(-DEG_2_RAD * *rotation);
+
+	shape_def.density = 1;
+	shape_def.enableHitEvents = true;
+	shape_def.enableContactEvents = true;
+	shape_def.enableSensorEvents = true;
+	shape_def.filter.categoryBits = COLLISION_FILTER_PLAYER;
+	shape_def.filter.maskBits     = COLLISION_FILTER_OBSTACLE | COLLISION_FILTER_SCORE_OBSTACLE | COLLISION_KILLER;
+
+    entity->body_id = b2CreateBody(state->world_id, &body_def);
+	b2CreateCircleShape(entity->body_id, &shape_def, &circle);
+	entity_create(state, entity, entity->body_id);
+
+	state->ball_body_id = &entity->body_id;
+
+	itu_lib_sprite_init(
+		&entity->sprite,
+		state->atlas,
+		itu_lib_sprite_get_source_rect(7, 7, 16, 16)
+	);
+	
+	return entity->body_id;
+
+}
+
 static b2BodyId create_dynamic_box(PinballGameState* state, vec2f position, vec2f size, optional<float> rotation = 0)
 {
 	b2BodyDef  body_def  = b2DefaultBodyDef();
@@ -187,7 +257,6 @@ static b2BodyId create_dynamic_box(PinballGameState* state, vec2f position, vec2
 	shape_def.enableHitEvents     = true;
 	shape_def.enableContactEvents = true;
 	shape_def.filter.categoryBits = COLLISION_FILTER_OBSTACLE;
-	shape_def.filter.maskBits     = COLLISION_FILTER_PLAYER;
 
     entity->body_id = b2CreateBody(state->world_id, &body_def);
     b2CreatePolygonShape(entity->body_id, &shape_def, &polygon);
@@ -274,6 +343,21 @@ static b2JointId create_joint_axislock(PinballGameState* state, b2BodyId a_body_
     return b2CreatePrismaticJoint(state->world_id, &joint_def);
 }
 
+
+
+static void lose_life(PinballGameState* state, EngineContext * context, b2BodyId ballId)
+{
+	entity_destroy(state, ballId);
+	state->lives--;
+
+	if(state->lives <= 0){
+		SDL_Log("YOU LOSE");
+		return;
+	}
+	create_new_ball(state, context, {5.5f, 0.0f});
+}
+
+
 static void game_reset(EngineContext* context, PinballGameState* state)
 {
 	if(b2World_IsValid(state->world_id))
@@ -282,16 +366,20 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	b2WorldDef def_world = b2DefaultWorldDef();
 	def_world.gravity.y = GRAVITY;
 	state->world_id = b2CreateWorld(&def_world);
-	b2World_SetHitEventThreshold(state->world_id, 0);
+	b2World_SetHitEventThreshold(state->world_id, -5);
 
 	state->phase = LAUNCHER_PHASE_READY;
 	state->charging = false;
 	state->power = power_min;
 	state->request_reset = false;
 	state->score = 0;
+	state->lives = 3;
 
 	// ball: dynamic body, disabled while it rests on the launcher
-	b2BodyDef body_def = b2DefaultBodyDef();
+
+	create_new_ball(state, context, {5.5f, 0.0f});
+
+	/*b2BodyDef body_def = b2DefaultBodyDef();
 	body_def.type      = b2_dynamicBody;
 	body_def.position = b2Vec2{5.5f, 0.0f};
 	body_def.isEnabled = true;
@@ -313,13 +401,13 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	ball_entity->body_id = b2CreateBody(state->world_id, &body_def);
 	state->ball_body_id = &ball_entity->body_id;
 
-	//b2CreateCircleShape(state->ball_body_id, &shape_def, &circle);
 	
 	shape_def.density = 1;
 	shape_def.enableHitEvents = true;
 	shape_def.enableContactEvents = true;
+	shape_def.enableSensorEvents = true;
 	shape_def.filter.categoryBits = COLLISION_FILTER_PLAYER;
-	shape_def.filter.maskBits     = COLLISION_FILTER_OBSTACLE | COLLISION_FILTER_SCORE_OBSTACLE;
+	shape_def.filter.maskBits     = COLLISION_FILTER_OBSTACLE | COLLISION_FILTER_SCORE_OBSTACLE | COLLISION_KILLER;
 
 	entity_create(state, ball_entity, ball_entity->body_id);
 
@@ -330,7 +418,7 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 		state->atlas,
 		itu_lib_sprite_get_source_rect(7, 7, 16, 16)
 	);	
-
+*/
 	//SphereObject
 
 	{
@@ -382,6 +470,10 @@ static void game_reset(EngineContext* context, PinballGameState* state)
 	create_static_box(state, {-4.0f, -3.0f}, {1.3f, 0.1f}, 40);
 	create_static_box(state, {4.0f, -3.0f}, {1.3f, 0.1f}, -40);
 
+	// Dead zone
+
+	create_kill_zone(state, {0.0f, -7.0f}, {5.0f, 1.0f});
+
     // flippers
 
 	state->flipper_left_id = create_dynamic_box(state, {-2.2f, -4.5f}, {1.1f, 0.1f}, 40);
@@ -430,16 +522,16 @@ static void game_update(EngineContext* context, PinballGameState* state)
 	
 
 	{
-		b2ContactEvents contact_events = b2World_GetContactEvents(state->world_id);
+		//b2ContactEvents contact_events = b2World_GetContactEvents(state->world_id);
 
-		b2ContactHitEvent * hitevents = contact_events.hitEvents;
+		//b2ContactHitEvent * hitevents = contact_events.hitEvents;
 
 		if(b2World_GetContactEvents(state->world_id).hitCount > 0)
 		{
 			//SDL_Log("HIT COUNTS: %i", b2World_GetContactEvents(state->world_id).hitCount);
-			b2ContactHitEvent * hitEvents = b2World_GetContactEvents(state->world_id).hitEvents;
+			//b2ContactHitEvent * hitEvents = b2World_GetContactEvents(state->world_id).hitEvents;
 			
-			for(int i = 0; i < b2World_GetContactEvents(state->world_id).hitCount; ++i){
+			/*for(int i = 0; i < b2World_GetContactEvents(state->world_id).hitCount; ++i){
 				b2ContactHitEvent event = hitEvents[i];
 
 				b2Filter filter_a = b2Shape_GetFilter(event.shapeIdA);
@@ -450,23 +542,51 @@ static void game_update(EngineContext* context, PinballGameState* state)
 					SDL_Log("SCORE: %i", state->score);
 					break;
 				}
+			}*/
+		}
+		if(b2World_GetContactEvents(state->world_id).beginCount > 0)
+		{
+			for(int i = 0; i < b2World_GetContactEvents(state->world_id).beginCount; ++i){
+				b2ContactBeginTouchEvent event = b2World_GetContactEvents(state->world_id).beginEvents[i];
+
+				b2Filter filter_a = b2Shape_GetFilter(event.shapeIdA);
+				b2Filter filter_b = b2Shape_GetFilter(event.shapeIdB);
+				if(filter_a.categoryBits & COLLISION_FILTER_SCORE_OBSTACLE){
+					state->score += 10;
+					
+					SDL_Log("BEGIN TOUCH. SCORE: %i", state->score);
+					//break;
+				}
+			}
+
+
+		}
+
+		if(b2World_GetSensorEvents(state->world_id).beginCount > 0)
+		{
+			for(int i = 0; i < b2World_GetSensorEvents(state->world_id).beginCount; ++i){
+				b2SensorBeginTouchEvent event = b2World_GetSensorEvents(state->world_id).beginEvents[i];
+				b2Filter filter_a = b2Shape_GetFilter(event.sensorShapeId);
+				if(filter_a.categoryBits & COLLISION_KILLER){		
+					SDL_Log("Ball dies");
+					lose_life(state, context, b2Shape_GetBody(event.visitorShapeId));
+					//break;
+				}
 			}
 		}
-		if(contact_events.beginCount > 0){
-			//SDL_Log("SOMETHING TOUCHED %i", contact_events.beginCount);
+
+		for(int i = 0; i < b2World_GetContactEvents(state->world_id).endCount; ++i){
+				b2ContactEndTouchEvent event = b2World_GetContactEvents(state->world_id).endEvents[i];
+
+				b2Filter filter_a = b2Shape_GetFilter(event.shapeIdA);
+				b2Filter filter_b = b2Shape_GetFilter(event.shapeIdB);
+				if(filter_a.categoryBits & COLLISION_FILTER_SCORE_OBSTACLE){					
+					SDL_Log("END TOUCH.");
+					//break;
+				}
 		}
 		
 	}
-
-	// NOTE: we are compouding precision errors here (config specifies frequency in steps per second, we convert to period in nanos,
-	//       and here we convert back to seconds), but specifying what you want once and expressing everything else in function of
-	//       it avoids mismatching. A more advanced implementation would have independent loop frequencies for game and physics and
-	//       synch them under the hood (you can try it in exercise 04.2, will be discussed in class during exercise review)
-	b2World_Step(state->world_id, NS_TO_SECONDS(context->target_framerate_fixed_ns), 4);
-
-	
-
-
 }
 
 static void game_render(EngineContext* context, PinballGameState* state)
@@ -504,7 +624,7 @@ static void game_render(EngineContext* context, PinballGameState* state)
 
 
 		SDL_Surface* surfaceMessage =
-			TTF_RenderText_Solid(Sans, cstr, 24, White); 
+			TTF_RenderText_Solid(Sans, cstr, 48, White); 
 
 		SDL_Texture* Message = SDL_CreateTextureFromSurface(context->renderer, surfaceMessage);
 
